@@ -58,7 +58,13 @@ class Intersection(object):
             self.phases = [i for i in range(len(phases)) if phases[i]['time']!=self.yellow_phase_time]
         else:
             self.yellow_phase_id = [0]
-            self.yellow_phase_time = 5
+            # było zahardkodowane 5 → yellow_length z configu był dla CityFlow ignorowany.
+            # Czytamy z protokołu, żeby dało się włączyć tryb "benchmark" (yellow_length: 0),
+            # w którym referencyjne implementacje z papierów liczą swoje wyniki.
+            try:
+                self.yellow_phase_time = Registry.mapping['trainer_mapping']['setting'].param['yellow_length']
+            except (KeyError, AttributeError):
+                self.yellow_phase_time = 5
             self.phases = [i for i in range(len(phases)) if not i in self.yellow_phase_id] # mapping from model output to cityflow phase id
         # parsing links and phases
         for roadlink in intersection["roadLinks"]:
@@ -782,7 +788,31 @@ class World(object):
         :return tvg_time: average travel time of all vehicles
         '''
         tvg_time = self.eng.get_average_travel_time()
+        if os.environ.get("ATT_VARIANTS"):
+            self._log_att_variants(tvg_time)
         return tvg_time
+
+    def _log_att_variants(self, tvg_time):
+        """ATT_VARIANTS=1 → dopisuje do logu metrykę, którą liczą autorzy linii
+        Advanced-XLight (`summary.py`), obok natywnej CityFlow: suma czasów na pasach
+        DOJAZDOWYCH sterowanych skrzyżowań, per pojazd, uśredniona po pojazdach.
+        Pojazdy wciąż w sieci mają leave_time = koniec epizodu (u nich `fillna(run_counts)`)."""
+        approach = set()
+        for I in self.intersections:
+            approach.update(I.startlanes)
+        per_vehicle = {}
+        for vid, legs in self.vehicle_trajectory.items():
+            if "shadow" in vid:
+                continue
+            per_vehicle[vid] = sum(t for lane, _, t in legs if lane in approach)
+        n = len(per_vehicle)
+        att_ref = sum(per_vehicle.values()) / n if n else float("nan")
+        all_legs = {vid: sum(t for _, _, t in legs) for vid, legs in self.vehicle_trajectory.items()
+                    if "shadow" not in vid}
+        att_alllanes = sum(all_legs.values()) / len(all_legs) if all_legs else float("nan")
+        print(f"[ATT_VARIANTS] cityflow={tvg_time:.2f} "
+              f"ref_style_approach_lanes={att_ref:.2f} all_lanes={att_alllanes:.2f} "
+              f"n_vehicles={n}", flush=True)
 
     def get_lane_queue_length(self):
         '''

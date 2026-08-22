@@ -377,7 +377,10 @@ class World(object):
         with open(sumo_config) as f:
             sumo_dict = json.load(f)
         if sumo_dict['gui'] == "True" or sumo_dict['gui'] == True:
-            sumo_cmd = [sumolib.checkBinary('sumo-gui')]
+            # local patch: autostart + per-step delay, otherwise the GUI opens paused
+            # and (once started) replays 3600 TraCI steps too fast to look at
+            sumo_cmd = [sumolib.checkBinary('sumo-gui'), '--start', '--quit-on-end',
+                        '--delay', str(sumo_dict.get('gui_delay', 100))]
         else:
             sumo_cmd = [sumolib.checkBinary('sumo')]
         if not sumo_dict.get('combined_file'):
