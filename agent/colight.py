@@ -1,26 +1,26 @@
-from . import RLAgent
-from common.registry import Registry
-import numpy as np
 import os
 import random
 from collections import OrderedDict, deque
+
 import gym
-
-from generator.lane_vehicle import LaneVehicleGenerator
-from generator.intersection_phase import IntersectionPhaseGenerator
+import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
-import torch_scatter
 import torch.optim as optim
+import torch_scatter
+from common.registry import Registry
+from generator.intersection_phase import IntersectionPhaseGenerator
+from generator.lane_vehicle import LaneVehicleGenerator
+from torch import nn
 from torch.nn.utils import clip_grad_norm_
-
+from torch_geometric.data import Batch, Data
 from torch_geometric.nn import MessagePassing
-from torch_geometric.data import Data, Batch
 from torch_geometric.utils import add_self_loops
 
+from . import RLAgent
 
-@Registry.register_model('colight')
+
+@Registry.register_model("colight")
 class CoLightAgent(RLAgent):
     #  TODO: test multiprocessing effect on agents or need deep copy here
     def __init__(self, world, rank):
@@ -30,48 +30,63 @@ class CoLightAgent(RLAgent):
         """
         #  general setting of world and model structure
         # TODO: different phases matching
-        self.buffer_size = Registry.mapping['trainer_mapping']['setting'].param['buffer_size']
+        self.buffer_size = Registry.mapping["trainer_mapping"]["setting"].param["buffer_size"]
         self.replay_buffer = deque(maxlen=self.buffer_size)
 
-        self.graph = Registry.mapping['world_mapping']['graph_setting'].graph
+        self.graph = Registry.mapping["world_mapping"]["graph_setting"].graph
         self.world = world
         self.sub_agents = len(self.world.intersections)
         # TODO: support dynamic graph later
-        self.edge_idx = torch.tensor(self.graph['sparse_adj'].T, dtype=torch.long)  # source -> target
+        self.edge_idx = torch.tensor(
+            self.graph["sparse_adj"].T, dtype=torch.long
+        )  # source -> target
 
         #  model parameters
-        self.phase = Registry.mapping['model_mapping']['setting'].param['phase']
-        self.one_hot = Registry.mapping['model_mapping']['setting'].param['one_hot']
-        self.model_dict = Registry.mapping['model_mapping']['setting'].param
+        self.phase = Registry.mapping["model_mapping"]["setting"].param["phase"]
+        self.one_hot = Registry.mapping["model_mapping"]["setting"].param["one_hot"]
+        self.model_dict = Registry.mapping["model_mapping"]["setting"].param
 
         #  get generator for CoLightAgent
         observation_generators = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ['lane_count'], in_only=True, average=None)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world, inter, ["lane_count"], in_only=True, average=None
+            )
             observation_generators.append((node_idx, tmp_generator))
-        sorted(observation_generators, key=lambda x: x[0])  # now generator's order is according to its index in graph
+        sorted(
+            observation_generators, key=lambda x: x[0]
+        )  # now generator's order is according to its index in graph
         self.ob_generator = observation_generators
 
         #  get reward generator for CoLightAgent
         rewarding_generators = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ["lane_waiting_count"],
-                                                 in_only=True, average='all', negative=True)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world,
+                inter,
+                ["lane_waiting_count"],
+                in_only=True,
+                average="all",
+                negative=True,
+            )
             rewarding_generators.append((node_idx, tmp_generator))
-        sorted(rewarding_generators, key=lambda x: x[0])  # now generator's order is according to its index in graph
+        sorted(
+            rewarding_generators, key=lambda x: x[0]
+        )  # now generator's order is according to its index in graph
         self.reward_generator = rewarding_generators
 
         #  get queue generator for CoLightAgent
         queues = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ["lane_waiting_count"], 
-                                                 in_only=True, negative=False)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world, inter, ["lane_waiting_count"], in_only=True, negative=False
+            )
             queues.append((node_idx, tmp_generator))
         # now generator's order is according to its index in graph
         sorted(queues, key=lambda x: x[0])
@@ -80,10 +95,11 @@ class CoLightAgent(RLAgent):
         #  get delay generator for CoLightAgent
         delays = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ["lane_delay"], 
-                                                 in_only=True, average="all", negative=False)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world, inter, ["lane_delay"], in_only=True, average="all", negative=False
+            )
             delays.append((node_idx, tmp_generator))
         # now generator's order is according to its index in graph
         sorted(delays, key=lambda x: x[0])
@@ -92,12 +108,15 @@ class CoLightAgent(RLAgent):
         #  phase generator
         phasing_generators = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = IntersectionPhaseGenerator(self.world, inter, ['phase'],
-                                                       targets=['cur_phase'], negative=False)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = IntersectionPhaseGenerator(
+                self.world, inter, ["phase"], targets=["cur_phase"], negative=False
+            )
             phasing_generators.append((node_idx, tmp_generator))
-        sorted(phasing_generators, key=lambda x: x[0])  # now generator's order is according to its index in graph
+        sorted(
+            phasing_generators, key=lambda x: x[0]
+        )  # now generator's order is according to its index in graph
         self.phase_generator = phasing_generators
 
         # TODO: add irregular control of signals in the future
@@ -113,65 +132,81 @@ class CoLightAgent(RLAgent):
         else:
             self.ob_length = min_ob_length
 
-        self.get_attention = Registry.mapping['logger_mapping']['setting'].param['attention']
+        self.get_attention = Registry.mapping["logger_mapping"]["setting"].param["attention"]
         # train parameters
         self.rank = rank
-        self.gamma = Registry.mapping['model_mapping']['setting'].param['gamma']
-        self.grad_clip = Registry.mapping['model_mapping']['setting'].param['grad_clip']
-        self.epsilon = Registry.mapping['model_mapping']['setting'].param['epsilon']
-        self.epsilon_decay = Registry.mapping['model_mapping']['setting'].param['epsilon_decay']
-        self.epsilon_min = Registry.mapping['model_mapping']['setting'].param['epsilon_min']
-        self.learning_rate = Registry.mapping['model_mapping']['setting'].param['learning_rate']
-        self.vehicle_max = Registry.mapping['model_mapping']['setting'].param['vehicle_max']
-        self.batch_size = Registry.mapping['model_mapping']['setting'].param['batch_size']
+        self.gamma = Registry.mapping["model_mapping"]["setting"].param["gamma"]
+        self.grad_clip = Registry.mapping["model_mapping"]["setting"].param["grad_clip"]
+        self.epsilon = Registry.mapping["model_mapping"]["setting"].param["epsilon"]
+        self.epsilon_decay = Registry.mapping["model_mapping"]["setting"].param["epsilon_decay"]
+        self.epsilon_min = Registry.mapping["model_mapping"]["setting"].param["epsilon_min"]
+        self.learning_rate = Registry.mapping["model_mapping"]["setting"].param["learning_rate"]
+        self.vehicle_max = Registry.mapping["model_mapping"]["setting"].param["vehicle_max"]
+        self.batch_size = Registry.mapping["model_mapping"]["setting"].param["batch_size"]
 
         self.model = self._build_model()
         self.target_model = self._build_model()
         self.update_target_network()
-        self.criterion = nn.MSELoss(reduction='mean')
-        self.optimizer = optim.RMSprop(self.model.parameters(),
-                                       lr=self.learning_rate,
-                                       alpha=0.9, centered=False, eps=1e-7)
+        self.criterion = nn.MSELoss(reduction="mean")
+        self.optimizer = optim.RMSprop(
+            self.model.parameters(), lr=self.learning_rate, alpha=0.9, centered=False, eps=1e-7
+        )
 
     def reset(self):
         observation_generators = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ['lane_count'], in_only=True, average=None)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world, inter, ["lane_count"], in_only=True, average=None
+            )
             observation_generators.append((node_idx, tmp_generator))
-        sorted(observation_generators, key=lambda x: x[0])  # now generator's order is according to its index in graph
+        sorted(
+            observation_generators, key=lambda x: x[0]
+        )  # now generator's order is according to its index in graph
         self.ob_generator = observation_generators
 
         #  get reward generator for CoLightAgent
         rewarding_generators = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ["lane_waiting_count"],
-                                                 in_only=True, average='all', negative=True)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world,
+                inter,
+                ["lane_waiting_count"],
+                in_only=True,
+                average="all",
+                negative=True,
+            )
             rewarding_generators.append((node_idx, tmp_generator))
-        sorted(rewarding_generators, key=lambda x: x[0])  # now generator's order is according to its index in graph
+        sorted(
+            rewarding_generators, key=lambda x: x[0]
+        )  # now generator's order is according to its index in graph
         self.reward_generator = rewarding_generators
 
         #  phase generator
         phasing_generators = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = IntersectionPhaseGenerator(self.world, inter, ['phase'],
-                                                       targets=['cur_phase'], negative=False)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = IntersectionPhaseGenerator(
+                self.world, inter, ["phase"], targets=["cur_phase"], negative=False
+            )
             phasing_generators.append((node_idx, tmp_generator))
-        sorted(phasing_generators, key=lambda x: x[0])  # now generator's order is according to its index in graph
+        sorted(
+            phasing_generators, key=lambda x: x[0]
+        )  # now generator's order is according to its index in graph
         self.phase_generator = phasing_generators
 
         # queue metric
         queues = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ["lane_waiting_count"], 
-                                                 in_only=True, negative=False)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world, inter, ["lane_waiting_count"], in_only=True, negative=False
+            )
             queues.append((node_idx, tmp_generator))
         # now generator's order is according to its index in graph
         sorted(queues, key=lambda x: x[0])
@@ -180,10 +215,11 @@ class CoLightAgent(RLAgent):
         # delay metric
         delays = []
         for inter in self.world.intersections:
-            node_id = inter.id if 'GS_' not in inter.id else inter.id[3:]
-            node_idx = self.graph['node_id2idx'][node_id]
-            tmp_generator = LaneVehicleGenerator(self.world, inter, ["lane_delay"], 
-                                                 in_only=True, average="all", negative=False)
+            node_id = inter.id if "GS_" not in inter.id else inter.id[3:]
+            node_idx = self.graph["node_id2idx"][node_id]
+            tmp_generator = LaneVehicleGenerator(
+                self.world, inter, ["lane_delay"], in_only=True, average="all", negative=False
+            )
             delays.append((node_idx, tmp_generator))
         # now generator's order is according to its index in graph
         sorted(delays, key=lambda x: x[0])
@@ -192,10 +228,10 @@ class CoLightAgent(RLAgent):
     def get_ob(self):
         x_obs = []  # sub_agents * lane_nums,
         for i in range(len(self.ob_generator)):
-            ob = self.ob_generator[i][1].generate()/ self.vehicle_max
-            ob = np.pad(ob, (0, self.ob_length - ob.shape[-1] ))
+            ob = self.ob_generator[i][1].generate() / self.vehicle_max
+            ob = np.pad(ob, (0, self.ob_length - ob.shape[-1]))
             x_obs.append(ob)
-            
+
         x_obs = np.array(x_obs, dtype=np.float32)
         return x_obs
 
@@ -211,7 +247,7 @@ class CoLightAgent(RLAgent):
         # TODO: test phase output onehot/int
         phase = []  # sub_agents
         for i in range(len(self.phase_generator)):
-            phase.append((self.phase_generator[i][1].generate()))
+            phase.append(self.phase_generator[i][1].generate())
         phase = (np.concatenate(phase)).astype(np.int8)
         # phase = np.concatenate(phase, dtype=np.int8)
         return phase
@@ -226,17 +262,17 @@ class CoLightAgent(RLAgent):
             item = item[1].generate()
             item = np.pad(item, (0, self.ob_length - item.shape[-1]))
             queue.append(item)
-            
+
         tmp_queue = np.squeeze(np.array(queue, dtype=np.float32))
-        queue = np.sum(tmp_queue, axis=1 if len(tmp_queue.shape)==2 else 0)
+        queue = np.sum(tmp_queue, axis=1 if len(tmp_queue.shape) == 2 else 0)
         return queue
 
     def get_delay(self):
         delay = []
         for i in range(len(self.delay)):
-            delay.append((self.delay[i][1].generate()))
+            delay.append(self.delay[i][1].generate())
         delay = np.squeeze(np.array(delay, dtype=np.float32))
-        return delay # [intersections,]
+        return delay  # [intersections,]
 
     def get_action(self, ob, phase, test=False):
         """
@@ -271,13 +307,13 @@ class CoLightAgent(RLAgent):
         else:
             actions = self.model(x=dp.x, edge_index=dp.edge_index, train=False)
             actions = actions.clone().detach().numpy()
-            
+
             action_list = []
             for action_vec, phase_length in zip(actions, self.phase_lengths):
                 action_list.append(np.argmax(action_vec[0:phase_length]))
             # action = np.clip(action, 0, self.phase_lengths - 1)
             action = np.array(action_list)
-            
+
             return action  # [batch, agents] TODO: check here
 
     def sample(self):
@@ -286,10 +322,14 @@ class CoLightAgent(RLAgent):
         return action
 
     def _build_model(self):
-        model = ColightNet(self.ob_length, self.action_space.n, self.phase_lengths, **self.model_dict)
+        model = ColightNet(
+            self.ob_length, self.action_space.n, self.phase_lengths, **self.model_dict
+        )
         return model
 
-    def remember(self, last_obs, last_phase, actions, actions_prob, rewards, obs, cur_phase, done, key):
+    def remember(
+        self, last_obs, last_phase, actions, actions_prob, rewards, obs, cur_phase, done, key
+    ):
         self.replay_buffer.append((key, (last_obs, last_phase, actions, rewards, obs, cur_phase)))
 
     def _batchwise(self, samples):
@@ -315,7 +355,9 @@ class CoLightAgent(RLAgent):
         actions = torch.tensor(np.array(actions), dtype=torch.long)
         if self.sub_agents > 1:
             rewards = rewards.view(rewards.shape[0] * rewards.shape[1])
-            actions = actions.view(actions.shape[0] * actions.shape[1])  # TODO: check all dimensions here
+            actions = actions.view(
+                actions.shape[0] * actions.shape[1]
+            )  # TODO: check all dimensions here
         # rewards = rewards.view(rewards.shape[0] * rewards.shape[1])
         # actions = torch.tensor(np.array(actions), dtype=torch.long)
         # actions = actions.view(actions.shape[0] * actions.shape[1])  # TODO: check all dimensions here
@@ -346,59 +388,74 @@ class CoLightAgent(RLAgent):
         self.target_model.load_state_dict(weights)
 
     def load_model(self, e):
-        model_name = os.path.join(Registry.mapping['logger_mapping']['path'].path,
-                                'model', f'{e}_{self.rank}.pt')
+        model_name = os.path.join(
+            Registry.mapping["logger_mapping"]["path"].path, "model", f"{e}_{self.rank}.pt"
+        )
         self.model.load_state_dict(torch.load(model_name))
         self.target_model.load_state_dict(torch.load(model_name))
 
     def save_model(self, e):
-        path = os.path.join(Registry.mapping['logger_mapping']['path'].path, 'model')
+        path = os.path.join(Registry.mapping["logger_mapping"]["path"].path, "model")
         if not os.path.exists(path):
             os.makedirs(path)
-        model_name = os.path.join(path, f'{e}_{self.rank}.pt')
-        torch.save(self.target_model.state_dict(), model_name)
+        model_name = os.path.join(path, f"{e}_{self.rank}.pt")
+        # PATCH (praca inz.): zapisujemy siec ONLINE, nie target.
+        # Decyzje podejmuje `self.model` (get_action), wiec to ona wyprodukowala
+        # liczby w krzywej uczenia i w tabeli. `target_model` to jej kopia sprzed
+        # nawet ~2 epizodow (update_target_rate=500 decyzji, epizod=240), wiec
+        # checkpoint bylby INNA siecia niz zmierzona. Faza 3 ewaluuje zamrozona
+        # polityke, wiec ta roznica wchodzilaby systematycznie do kazdego wyniku.
+        # Reszta LibSignala (presslight, dqn_torch_agent, colight_pytorch_agent)
+        # zapisuje `self.model` — ten patch usuwa niespojnosc, nie wprowadza jej.
+        torch.save(self.model.state_dict(), model_name)
 
 
 class ColightNet(nn.Module):
     def __init__(self, input_dim, output_dim, phase_lengths, **kwargs):
-        super(ColightNet, self).__init__()
+        super().__init__()
         self.model_dict = kwargs
-        self.batch_size = self.model_dict['batch_size']
+        self.batch_size = self.model_dict["batch_size"]
         self.action_space = gym.spaces.Discrete(output_dim)
         self.features = input_dim
         self.module_list = nn.ModuleList()
-        self.embedding_MLP = Embedding_MLP(self.features, layers=self.model_dict.get('NODE_EMB_DIM'))
-        for i in range(self.model_dict.get('N_LAYERS')):
-            block = MultiHeadAttModel(d=self.model_dict.get('INPUT_DIM')[i],
-                                      dv=self.model_dict.get('NODE_LAYER_DIMS_EACH_HEAD')[i],
-                                      d_out=self.model_dict.get('OUTPUT_DIM')[i],
-                                      nv=self.model_dict.get('NUM_HEADS')[i],
-                                      suffix=i)
+        self.embedding_MLP = Embedding_MLP(
+            self.features, layers=self.model_dict.get("NODE_EMB_DIM")
+        )
+        for i in range(self.model_dict.get("N_LAYERS")):
+            block = MultiHeadAttModel(
+                d=self.model_dict.get("INPUT_DIM")[i],
+                dv=self.model_dict.get("NODE_LAYER_DIMS_EACH_HEAD")[i],
+                d_out=self.model_dict.get("OUTPUT_DIM")[i],
+                nv=self.model_dict.get("NUM_HEADS")[i],
+                suffix=i,
+            )
             self.module_list.append(block)
         output_dict = OrderedDict()
 
-        if len(self.model_dict['OUTPUT_LAYERS']) != 0:
+        if len(self.model_dict["OUTPUT_LAYERS"]) != 0:
             # TODO: dubug this branch
-            for l_idx, l_size in enumerate(self.model_dict['OUTPUT_LAYERS']):
-                name = f'output_{l_idx}'
+            for l_idx, l_size in enumerate(self.model_dict["OUTPUT_LAYERS"]):
+                name = f"output_{l_idx}"
                 if l_idx == 0:
                     h = nn.Linear(block.d_out, l_size)
                 else:
-                    h = nn.Linear(self.model_dict.get('OUTPUT_LAYERS')[l_idx - 1], l_size)
+                    h = nn.Linear(self.model_dict.get("OUTPUT_LAYERS")[l_idx - 1], l_size)
                 output_dict.update({name: h})
-                name = f'relu_{l_idx}'
+                name = f"relu_{l_idx}"
                 output_dict.update({name: nn.ReLU})
-            out = nn.Linear(self.model_dict['OUTPUT_LAYERS'][-1], self.action_space.n)
+            out = nn.Linear(self.model_dict["OUTPUT_LAYERS"][-1], self.action_space.n)
         else:
             out = nn.Linear(block.d_out, self.action_space.n)
-        name = f'output'
+        name = "output"
         output_dict.update({name: out})
-        
+
         # make mask
         unpadded_phase_mask = [torch.ones(length, dtype=torch.bool) for length in phase_lengths]
         phase_mask = torch.nn.utils.rnn.pad_sequence(unpadded_phase_mask, batch_first=True)
-        mask_layer = MaskedOutput(mask=phase_mask, batch_size=self.batch_size, action_space=self.action_space)
-        output_dict.update({'out_mask': mask_layer})
+        mask_layer = MaskedOutput(
+            mask=phase_mask, batch_size=self.batch_size, action_space=self.action_space
+        )
+        output_dict.update({"out_mask": mask_layer})
 
         self.output_layer = nn.Sequential(output_dict)
 
@@ -417,9 +474,10 @@ class ColightNet(nn.Module):
                 h = self.output_layer(h)
         return h
 
+
 class MaskedOutput(nn.Module):
     def __init__(self, mask, batch_size, action_space):
-        super(MaskedOutput, self).__init__()
+        super().__init__()
         self.batch_size = batch_size
         self.mask = mask
         self.action_space = action_space
@@ -427,13 +485,14 @@ class MaskedOutput(nn.Module):
     def forward(self, x):
         # Apply the mask to the output
         # x = torch.exp(x)
-        masked_output = x.reshape(-1 ,self.mask.shape[0], self.action_space.n) * self.mask
+        masked_output = x.reshape(-1, self.mask.shape[0], self.action_space.n) * self.mask
         masked_output = masked_output.reshape(-1, self.mask.shape[-1])
         return masked_output
 
+
 class Embedding_MLP(nn.Module):
     def __init__(self, in_size, layers):
-        super(Embedding_MLP, self).__init__()
+        super().__init__()
         constructor_dict = OrderedDict()
         for l_idx, l_size in enumerate(layers):
             name = f"node_embedding_{l_idx}"
@@ -473,8 +532,9 @@ class MultiHeadAttModel(MessagePassing):
         -hidden state: [batch,agents,32]
         -attention: [batch,agents,neighbor]
     """
+
     def __init__(self, d, dv, d_out, nv, suffix):
-        super(MultiHeadAttModel, self).__init__(aggr='add')
+        super().__init__(aggr="add")
         self.d = d
         self.dv = dv
         self.d_out = d_out
@@ -496,7 +556,7 @@ class MultiHeadAttModel(MessagePassing):
         aggregated = self.propagate(x=x, edge_index=edge_index)  # [16, 16]
         out = self.out(aggregated)
         out = F.relu(out)  # [ 16, 128]
-        #self.att = torch.tensor(self.att_list)
+        # self.att = torch.tensor(self.att_list)
         return out
 
     def forward(self, x, edge_index, train=True):
@@ -541,5 +601,5 @@ class MultiHeadAttModel(MessagePassing):
 
     def get_att(self):
         if self.att is None:
-            print('invalid att')
+            print("invalid att")
         return self.att

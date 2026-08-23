@@ -290,7 +290,15 @@ class DQNAgent(RLAgent):
         if not os.path.exists(path):
             os.makedirs(path)
         model_name = os.path.join(path, f'{e}_{self.rank}.pt')
-        torch.save(self.target_model.state_dict(), model_name)
+        # PATCH (praca inz.): zapisujemy siec ONLINE, nie target.
+        # Decyzje podejmuje `self.model` (get_action), wiec to ona wyprodukowala
+        # liczby w krzywej uczenia i w tabeli. `target_model` to jej kopia sprzed
+        # nawet ~2 epizodow (update_target_rate=500 decyzji, epizod=240), wiec
+        # checkpoint bylby INNA siecia niz zmierzona. Faza 3 ewaluuje zamrozona
+        # polityke, wiec ta roznica wchodzilaby systematycznie do kazdego wyniku.
+        # Reszta LibSignala (presslight, dqn_torch_agent, colight_pytorch_agent)
+        # zapisuje `self.model` — ten patch usuwa niespojnosc, nie wprowadza jej.
+        torch.save(self.model.state_dict(), model_name)
 
 
 class DQNNet(nn.Module):

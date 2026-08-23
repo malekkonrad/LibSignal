@@ -193,9 +193,16 @@ def load_config_dict(config_path, other_world_settings=None):
 def get_output_file_path(config):
     """"
     set output path
+
+    PATCH (praca inz.): honoruj `logger.root_dir` zamiast pisac wyniki do
+    `world.dir` (= katalog WEJSCIOWYCH, wersjonowanych sieci). Bez tego
+    `root_dir` z configu byl martwym zapisem, a artefakty treningu ladowaly
+    w `data/output_data/`. Fallback zachowuje zachowanie upstreamu, gdy klucza brak.
     """
     param = config['command']
-    path = os.path.join(config['world']['dir'] , 'output_data', param['task'], 
+    root = config.get('logger', {}).get('root_dir')
+    base = root if root else os.path.join(config['world']['dir'], 'output_data')
+    path = os.path.join(base, param['task'],
         f"{param['world']}_{param['agent']}", param['network'], param['prefix'])
     return path
 
