@@ -1,23 +1,20 @@
-import pickle
-import numpy as np 
-import json
-import os
-import sys
-import yaml
 import copy
+import json
 import logging
-from datetime import datetime
+import os
+import pickle
 
-from common.registry import Registry
-import world
+import numpy as np
 import sumolib
+import yaml
 
 
 def get_road_dict(roadnet_dict, road_id):
-    for item in roadnet_dict['roads']:
-        if item['id'] == road_id:
+    for item in roadnet_dict["roads"]:
+        if item["id"] == road_id:
             return item
     raise KeyError("environment and graph setting mapping error, no such road exists")
+
 
 def build_index_intersection_map_cityflow(roadnet_file):
     """
@@ -30,8 +27,8 @@ def build_index_intersection_map_cityflow(roadnet_file):
         node_degree_node,node_degree_edge,node_adjacent_node_matrix,node_adjacent_edge_matrix,
         edge_adjacent_node_matrix]
     """
-    roadnet_dict = json.load(open(roadnet_file, "r"))
-    virt = "virtual" # judge whether is virtual node, especially in convert_sumo file
+    roadnet_dict = json.load(open(roadnet_file))
+    virt = "virtual"  # judge whether is virtual node, especially in convert_sumo file
     if "gt_virtual" in roadnet_dict["intersections"][0]:
         virt = "gt_virtual"
     valid_intersection_id = [node["id"] for node in roadnet_dict["intersections"] if not node[virt]]
@@ -61,7 +58,7 @@ def build_index_intersection_map_cityflow(roadnet_file):
     # sanity check of node number equals intersection numbers
     if cur_num != len(valid_intersection_id):
         raise ValueError("environment and graph setting mapping error, node 1 to 1 mapping error")
-    
+
     # build the map between identity and index and built the adjacent matrix of edge
     cur_num = 0
     for edge_dict in roadnet_dict["roads"]:
@@ -72,30 +69,30 @@ def build_index_intersection_map_cityflow(roadnet_file):
             edge_idx2id[cur_num] = edge_id
             edge_id2idx[edge_id] = cur_num
             cur_num += 1
-            input_node_id = edge_dict['startIntersection']
-            output_node_id = edge_dict['endIntersection']
+            input_node_id = edge_dict["startIntersection"]
+            output_node_id = edge_dict["endIntersection"]
             input_node_idx = node_id2idx[input_node_id]
             output_node_idx = node_id2idx[output_node_id]
             sparse_adj.append([input_node_idx, output_node_idx])
-    
-    # build adjacent matrix for node (i.e the adjacent node of the node, and the 
+
+    # build adjacent matrix for node (i.e the adjacent node of the node, and the
     # adjacent edge of the node)
     for node_dict in roadnet_dict["intersections"]:
         if node_dict[virt]:
-            continue        
+            continue
         node_id = node_dict["id"]
-        road_links = node_dict['roads']
+        road_links = node_dict["roads"]
         input_nodes = []  # should be node_degree
         input_edges = []  # needed, should be node_degree
         for road_link_id in road_links:
             road_link_dict = get_road_dict(roadnet_dict, road_link_id)
-            if road_link_dict['endIntersection'] == node_id:
+            if road_link_dict["endIntersection"] == node_id:
                 if road_link_id in edge_id2idx.keys():
                     input_edge_idx = edge_id2idx[road_link_id]
                     input_edges.append(input_edge_idx)
                 else:
                     continue
-                start_node = road_link_dict['startIntersection']
+                start_node = road_link_dict["startIntersection"]
                 if start_node in node_id2idx.keys():
                     start_node_idx = node_id2idx[start_node]
                     input_nodes.append(start_node_idx)
@@ -109,11 +106,18 @@ def build_index_intersection_map_cityflow(roadnet_file):
     node_degrees = np.array(node_degrees)  # the num of adjacent nodes of node
     sparse_adj = np.array(sparse_adj)  # the valid num of adjacent edges of node
 
-    result = {'node_idx2id': node_idx2id, 'node_id2idx': node_id2idx,
-              'edge_idx2id': edge_idx2id, 'edge_id2idx': edge_id2idx,
-              'node_degrees': node_degrees, 'sparse_adj': sparse_adj,
-              'node_list': node_list, 'edge_list': edge_list}
+    result = {
+        "node_idx2id": node_idx2id,
+        "node_id2idx": node_id2idx,
+        "edge_idx2id": edge_idx2id,
+        "edge_id2idx": edge_id2idx,
+        "node_degrees": node_degrees,
+        "sparse_adj": sparse_adj,
+        "node_list": node_list,
+        "edge_list": edge_list,
+    }
     return result
+
 
 def build_index_intersection_map_sumo(roadnet_file):
 
@@ -128,10 +132,11 @@ def build_index_intersection_map_sumo(roadnet_file):
     edge_list = []  # adjacent node of each node
     node_list = []  # adjacent edge of each node
     sparse_adj = []  # adjacent node of each edge
-    
+
     def get_node_id(node):
         node_id = node.getID()
-        return node_id if 'GS_' not in node_id else node_id[3:]
+        return node_id if "GS_" not in node_id else node_id[3:]
+
     # build the map between identity and index of node
     cur_num = 0
     for tl in net.getTrafficLights():
@@ -158,10 +163,10 @@ def build_index_intersection_map_sumo(roadnet_file):
         output_node_idx = node_id2idx[output_node_id]
         sparse_adj.append([input_node_idx, output_node_idx])
 
-    # build adjacent matrix for node (i.e the adjacent node of the node, and the 
-        # adjacent edge of the node)
+    # build adjacent matrix for node (i.e the adjacent node of the node, and the
+    # adjacent edge of the node)
     for tl in net.getTrafficLights():
-        node_id = get_node_id(tl) 
+        node_id = get_node_id(tl)
         road_links = tl.getEdges()
         input_nodes = []  # should be node_degree
         input_edges = []  # needed, should be node_degree
@@ -187,11 +192,18 @@ def build_index_intersection_map_sumo(roadnet_file):
     node_degrees = np.array(node_degrees)  # the num of adjacent nodes of node
     sparse_adj = np.array(sparse_adj)  # the valid num of adjacent edges of node
 
-    result = {'node_idx2id': node_idx2id, 'node_id2idx': node_id2idx,
-            'edge_idx2id': edge_idx2id, 'edge_id2idx': edge_id2idx,
-            'node_degrees': node_degrees, 'sparse_adj': sparse_adj,
-            'node_list': node_list, 'edge_list': edge_list}
+    result = {
+        "node_idx2id": node_idx2id,
+        "node_id2idx": node_id2idx,
+        "edge_idx2id": edge_idx2id,
+        "edge_id2idx": edge_id2idx,
+        "node_degrees": node_degrees,
+        "sparse_adj": sparse_adj,
+        "node_list": node_list,
+        "edge_list": edge_list,
+    }
     return result
+
 
 def analyse_vehicle_nums(file_path):
     replay_buffer = pickle.load(open(file_path, "rb"))
@@ -205,7 +217,7 @@ def analyse_vehicle_nums(file_path):
 
 
 def get_output_file_path(task, model, prefix):
-    path = os.path.join('./data/output_data', task, model, prefix)
+    path = os.path.join("./data/output_data", task, model, prefix)
     return path
 
 
@@ -216,7 +228,7 @@ def load_config(path, previous_includes=[]):
         )
     previous_includes = previous_includes + [path]
 
-    direct_config = yaml.load(open(path, "r"), Loader=yaml.Loader)
+    direct_config = yaml.load(open(path), Loader=yaml.Loader)
 
     # Load configs from included files.
     if "includes" in direct_config:
@@ -224,9 +236,7 @@ def load_config(path, previous_includes=[]):
     else:
         includes = []
     if not isinstance(includes, list):
-        raise AttributeError(
-            "Includes must be a list, '{}' provided".format(type(includes))
-        )
+        raise AttributeError(f"Includes must be a list, '{type(includes)}' provided")
 
     config = {}
     duplicates_warning = []
@@ -234,9 +244,7 @@ def load_config(path, previous_includes=[]):
 
     # TODO: Need test duplication here
     for include in includes:
-        include_config, inc_dup_warning, inc_dup_error = load_config(
-            include, previous_includes
-        )
+        include_config, inc_dup_warning, inc_dup_error = load_config(include, previous_includes)
         duplicates_warning += inc_dup_warning
         duplicates_error += inc_dup_error
 
@@ -293,7 +301,7 @@ def merge_dicts(dict1: dict, dict2: dict):
 
 def build_config(args):
     # configs file of specific agents is loaded from configs/agents/{agent_name}
-    agent_name = os.path.join('./configs/agents', args.task, f'{args.agent}.yml')
+    agent_name = os.path.join("./configs/agents", args.task, f"{args.agent}.yml")
     config, duplicates_warning, duplicates_error = load_config(agent_name)
     if len(duplicates_warning) > 0:
         logging.warning(
@@ -310,7 +318,8 @@ def build_config(args):
         config.update({key: args_dict[key]})  # short access for important param
 
     # add network(for FRAP and MPLight)
-    cityflow_setting = json.load(open(config['path'], 'r'))
-    config['traffic']['network'] = cityflow_setting['network'] if 'network' in cityflow_setting.keys() else None
+    cityflow_setting = json.load(open(config["path"]))
+    config["traffic"]["network"] = (
+        cityflow_setting["network"] if "network" in cityflow_setting.keys() else None
+    )
     return config
-
